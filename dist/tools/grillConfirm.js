@@ -1,4 +1,5 @@
 import { saveHistory, savePreference, saveProjectContext } from '../memory/store.js';
+import { buildDeliveryReminder } from '../prompt/reminders.js';
 import { textOutput } from './grillStart.js';
 /** grill_confirm 的参数 schema。 */
 const PARAMETERS = {
@@ -142,7 +143,7 @@ export function createGrillConfirmTool(deps) {
                 deps.sessions.end(agentId);
                 deps.gates.open(agentId);
                 deps.logger?.warn?.(`[grill-first] 需求已确认（通道=${channel}，agent=${agentId}）`);
-                return { confirmed: true, final_requirements: requirements, saved };
+                return { confirmed: true, final_requirements: requirements, instructions: buildDeliveryReminder(), saved };
             };
             // 兜底声明只在本任务的同一清单确实进入兜底流程后有效。
             const issued = fallback.get(agentId);

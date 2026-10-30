@@ -20,6 +20,7 @@ import type {
   ToolRunContext,
   UserQuestionsService,
 } from '../types.js'
+import { buildDeliveryReminder } from '../prompt/reminders.js'
 import { textOutput } from './grillStart.js'
 import type { SessionRegistry } from './sessions.js'
 
@@ -208,7 +209,7 @@ export function createGrillConfirmTool(deps: GrillConfirmDeps): ToolDefinition {
         deps.sessions.end(agentId)
         deps.gates.open(agentId)
         deps.logger?.warn?.(`[grill-first] 需求已确认（通道=${channel}，agent=${agentId}）`)
-        return { confirmed: true, final_requirements: requirements, saved }
+        return { confirmed: true, final_requirements: requirements, instructions: buildDeliveryReminder(), saved }
       }
 
       // 兜底声明只在本任务的同一清单确实进入兜底流程后有效。

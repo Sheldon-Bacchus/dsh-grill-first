@@ -1,5 +1,6 @@
 import { buildFocusHints, detectDimensions, judgeTask } from '../judge/heuristics.js';
 import { loadMemory, summarize } from '../memory/store.js';
+import { buildDispatchReminder } from '../prompt/reminders.js';
 import { PLUGIN_VERSION } from '../version.js';
 /** 把对象包成"回灌给模型的文本块"。 */
 export function textOutput(schema) {
@@ -103,6 +104,7 @@ export function createGrillStartTool(deps) {
                     score: judged.score,
                     gate_state: 'open',
                     mode,
+                    hint: buildDispatchReminder(),
                     version: PLUGIN_VERSION,
                 };
             }
@@ -144,11 +146,11 @@ export function createGrillStartTool(deps) {
                 score: evaluated.score,
                 memory_context: memoryContext,
                 focus_hints: focus,
-                hint: judged.reason === 'inquiry' && preserving
+                hint: `${judged.reason === 'inquiry' && preserving
                     ? '先回答当前咨询，再回到待确认任务；咨询不代表同意开工。'
                     : atLimit || ready || focus.length === 0
                         ? '停止追问，把需求及尚未验证的假设整理成四段清单，调用 grill_confirm；确认前不得开工。'
-                        : '结合已知偏好和已有答案，只问仍影响方案的歧义；问题数是上限，不必凑数。每轮回答后用 continue 记录答案摘要与实际问过的维度。',
+                        : '结合已知偏好和已有答案，只问仍影响方案的歧义；问题数是上限，不必凑数。每轮回答后用 continue 记录答案摘要与实际问过的维度。'}\n\n${buildDispatchReminder()}`,
                 gate_state: 'closed',
                 max_rounds: config.maxRounds,
                 max_questions_per_round: config.maxQuestionsPerRound,
