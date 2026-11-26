@@ -4,11 +4,19 @@
  * - clear：放行（门禁置 open），模型直接开工；
  * - needs-clarification：门禁置 closed，并返回记忆摘要、追问方向与轮次上限。
  */
-import type { GrillConfig, MemoryScope } from '../config.js'
+import {
+  RECOMMENDATION_CATEGORIES,
+  resolveEffectiveRecommendationCategories,
+  type GrillConfig,
+  type MemoryScope,
+  type RecommendationCategory,
+  type RecommendationMode,
+} from '../config.js'
 import type { GateRegistry } from '../gate/preExecute.js'
 import { buildFocusHints, detectDimensions, judgeTask } from '../judge/heuristics.js'
 import { loadMemory, summarize } from '../memory/store.js'
 import { buildDispatchReminder } from '../prompt/reminders.js'
+import { hasManualReviewSignal } from '../recommendation.js'
 import type { GrillAgent, ToolDefinition, ToolRunContext } from '../types.js'
 import { PLUGIN_VERSION } from '../version.js'
 import type { SessionRegistry } from './sessions.js'
@@ -39,6 +47,10 @@ export interface GrillStartResult {
   intensity?: string
   mode?: string
   task_id?: string
+  task_version?: number
+  recommendation_mode?: RecommendationMode
+  effective_recommendation_categories?: RecommendationCategory[]
+  recommendation_eligible?: boolean
   previous_task?: string
   hint?: string
   /** 已经追问过的轮数（达到 maxRounds 后不再追问）。 */
@@ -72,6 +84,7 @@ const PARAMETERS: Record<string, unknown> = {
     },
     answer_summary: { type: 'string', maxLength: 4000, description: 'continue 时填写上一轮用户答案摘要，与 asked_dimensions 同传；不要把假设写成用户答案。' },
     asked_dimensions: { type: 'array', uniqueItems: true, items: { type: 'string', enum: ['goal', 'scope', 'constraint', 'acceptance'] }, description: '上一轮实际问过的维度；仅与非空 answer_summary 一起提交才计一轮。' },
+    pending_recommendations: { type: 'boolean', description: '存在属于低风险表达层且待评估的推荐决定时传 true；启用推荐模式时会保持任务与关闭的门禁，供 grill_confirm 独立推荐结算。' },
   },
   required: ['task'],
   additionalProperties: false,
@@ -93,6 +106,10 @@ const OUTPUT_SCHEMA: Record<string, unknown> = {
     intensity: { type: 'string' },
     mode: { type: 'string' },
     task_id: { type: 'string' },
+    task_version: { type: 'number' },
+    recommendation_mode: { type: 'string' },
+    effective_recommendation_categories: { type: 'array', items: { type: 'string' } },
+    recommendation_eligible: { type: 'boolean' },
     previous_task: { type: 'string' },
     hint: { type: 'string' },
     rounds_used: { type: 'number', description: '已经追问过的轮数' },
@@ -114,7 +131,13 @@ export function createGrillStartTool(deps: GrillStartDeps): ToolDefinition {
     output: textOutput(OUTPUT_SCHEMA),
     isConcurrencySafe: () => false,
     async execute(rawArgs: unknown, exec: ToolRunContext): Promise<GrillStartResult> {
-      const args = (rawArgs ?? {}) as { task?: unknown; mode?: unknown; answer_summary?: unknown; asked_dimensions?: unknown }
+      const args = (rawArgs ?? {}) as {
+        task?: unknown
+        mode?: unknown
+        answer_summary?: unknown
+        asked_dimensions?: unknown
+        pending_recommendations?: unknown
+      }
       const config = deps.config()
       const agentId = exec?.agent?.id ?? ''
       const task = typeof args.task === 'string' ? args.task.trim() : ''
@@ -122,6 +145,22 @@ export function createGrillStartTool(deps: GrillStartDeps): ToolDefinition {
 
       if (!config.enabled) {
         return { verdict: 'clear', skip: true, reason: 'disabled', version: PLUGIN_VERSION }
+      }
+      if (config.recommendationMode === 'autonomous') {
+        deps.sessions.end(agentId)
+        deps.gates.open(agentId, 'autonomous')
+        return {
+          verdict: 'clear',
+          skip: true,
+          reason: 'autonomous-mode',
+          gate_state: 'open',
+          mode,
+          recommendation_mode: 'autonomous',
+          effective_recommendation_categories: [...RECOMMENDATION_CATEGORIES],
+          recommendation_eligible: true,
+          hint: '当前为全权自主模式（autonomous）：无需追问或弹确认卡，由你直接决定方案并自由选择直接执行、开 Sub 或开 Team。',
+          version: PLUGIN_VERSION,
+        }
       }
       if (task === '') {
         return {
@@ -134,6 +173,7 @@ export function createGrillStartTool(deps: GrillStartDeps): ToolDefinition {
         }
       }
 
+      const effectiveCategories = [...resolveEffectiveRecommendationCategories(config)]
       const judged = judgeTask({
         text: mode === 'continue' && typeof args.answer_summary === 'string' ? `${task}\n${args.answer_summary}` : task,
         mode: mode === 'continue' ? 'new-task' : mode,
@@ -144,13 +184,55 @@ export function createGrillStartTool(deps: GrillStartDeps): ToolDefinition {
 
       // drift-check 是用户显式切换任务：必须重置会话，不能被 inquiry/follow-up 判定保留旧任务。
       const preserving = !!previous && mode !== 'drift-check' && (mode === 'continue' || judged.reason === 'follow-up' || judged.reason === 'inquiry')
-      if (mode === 'continue' && !previous) {
-        deps.gates.close(agentId)
-        return { verdict: 'needs-clarification', skip: false, reason: 'no-active-task', gate_state: 'closed', hint: '没有待澄清任务，请用 new-task 提交任务原文。' }
+      if (mode === 'continue') {
+        if (!previous) {
+          if (deps.gates.stateOf(agentId) !== 'closed') deps.gates.close(agentId)
+          return {
+            verdict: 'needs-clarification',
+            skip: false,
+            reason: 'no-active-task',
+            gate_state: 'closed',
+            hint: '没有待澄清任务，请用 new-task 提交任务原文。',
+            version: PLUGIN_VERSION,
+          }
+        }
+        if (previous.gateRevision !== undefined && deps.gates.revisionOf(agentId) !== previous.gateRevision) {
+          deps.sessions.end(agentId)
+          if (deps.gates.stateOf(agentId) !== 'closed') deps.gates.close(agentId)
+          return {
+            verdict: 'needs-clarification',
+            skip: false,
+            reason: 'stale-task',
+            gate_state: 'closed',
+            hint: '原任务已被新消息或变更打断，旧澄清已作废；请用 mode:"new-task" 或 "drift-check" 重新开始。',
+            version: PLUGIN_VERSION,
+          }
+        }
       }
-      if (judged.verdict === 'clear' && (!preserving || judged.reason === 'bypass-keyword')) {
+
+      const pendingRecommendations = args.pending_recommendations === true
+        ? true
+        : args.pending_recommendations === false
+          ? false
+          : (preserving && Boolean(previous?.pendingRecommendations))
+      const manualRequired = hasManualReviewSignal(task)
+        || (mode === 'continue' && typeof args.answer_summary === 'string' && hasManualReviewSignal(args.answer_summary))
+        || (preserving && Boolean(previous?.manualRequired))
+        || (preserving && (previous?.history ?? []).some((round) => hasManualReviewSignal(round.answer)))
+      const manualGateRequired = manualRequired
+        && judged.reason !== 'bypass-keyword'
+        && judged.reason !== 'inquiry'
+        && judged.reason !== 'follow-up'
+      const recommendationActive = pendingRecommendations
+        && config.recommendationMode !== 'manual'
+        && effectiveCategories.length > 0
+        && judged.reason !== 'bypass-keyword'
+        && judged.reason !== 'inquiry'
+        && judged.reason !== 'follow-up'
+
+      if (!recommendationActive && !manualGateRequired && judged.verdict === 'clear' && (!preserving || judged.reason === 'bypass-keyword')) {
         deps.sessions.end(agentId)
-        deps.gates.open(agentId)
+        deps.gates.open(agentId, 'clear')
         return {
           verdict: 'clear',
           skip: true,
@@ -158,30 +240,81 @@ export function createGrillStartTool(deps: GrillStartDeps): ToolDefinition {
           score: judged.score,
           gate_state: 'open',
           mode,
+          recommendation_mode: config.recommendationMode,
+          effective_recommendation_categories: effectiveCategories,
+          recommendation_eligible: false,
           hint: buildDispatchReminder(),
           version: PLUGIN_VERSION,
         }
       }
 
       const startedAt = preserving ? previous!.startedAt : Date.now()
-      if (!preserving) deps.sessions.start({ agentId, task, mode: mode === 'drift-check' ? mode : 'new-task', startedAt, rounds: 0 })
-      deps.gates.close(agentId)
+      let activeSession = preserving ? previous : undefined
+      if (!preserving) {
+        activeSession = deps.sessions.start({
+          agentId,
+          task,
+          mode: mode === 'drift-check' ? mode : 'new-task',
+          startedAt,
+          rounds: 0,
+          pendingRecommendations,
+          recommendationReady: false,
+          manualRequired,
+        })
+        deps.gates.close(agentId)
+      } else if (deps.gates.stateOf(agentId) !== 'closed') {
+        deps.gates.close(agentId)
+      }
+
       const answer = typeof args.answer_summary === 'string' ? args.answer_summary.trim() : ''
       const keys = ['goal', 'scope', 'constraint', 'acceptance'] as const
       const asked = Array.isArray(args.asked_dimensions)
         ? keys.filter((key) => args.asked_dimensions instanceof Array && args.asked_dimensions.includes(key)) : []
       if (mode === 'continue' && (answer.length > 4000 || (!!answer !== (asked.length > 0)))) {
-        return { verdict: 'needs-clarification', skip: false, reason: 'invalid-continuation', gate_state: 'closed', hint: '答案摘要须不超过4000字，并与上一轮实际提问维度同时提供；未记录本轮。' }
+        const currentRevision = deps.gates.revisionOf(agentId)
+        if (previous) {
+          previous.gateRevision = currentRevision
+          previous.recommendationReady = false
+        }
+        return {
+          verdict: 'needs-clarification',
+          skip: false,
+          reason: 'invalid-continuation',
+          gate_state: 'closed',
+          task_id: previous?.taskId ?? `${agentId}:${startedAt}`,
+          task_version: currentRevision,
+          recommendation_mode: config.recommendationMode,
+          effective_recommendation_categories: effectiveCategories,
+          recommendation_eligible: false,
+          hint: '答案摘要须不超过4000字，并与上一轮实际提问维度同时提供；未记录本轮。',
+          version: PLUGIN_VERSION,
+        }
       }
       if (mode === 'continue') deps.sessions.recordAnswer(agentId, answer, asked, config.maxRounds)
+
+      const gateRevision = deps.gates.revisionOf(agentId)
       const session = deps.sessions.get(agentId)
+      if (session) {
+        session.pendingRecommendations = pendingRecommendations
+        session.manualRequired = manualRequired
+        session.gateRevision = gateRevision
+        session.recommendationReady = false
+      }
+
       const roundsUsed = session?.rounds ?? 0
       const combined = [session?.task ?? task, ...(session?.history ?? []).map((round) => round.answer)].join('\n')
       const evaluated = judgeTask({ text: combined, mode: 'new-task', intensity: config.intensity, bypassKeywords: [] })
       const atLimit = roundsUsed >= config.maxRounds
-      const ready = preserving && evaluated.verdict === 'clear'
+      const unresolvedBlocker = evaluated.verdict !== 'clear' || (judged.verdict !== 'clear' && mode !== 'continue')
+      const ready = (preserving && evaluated.verdict === 'clear') || (manualGateRequired && !unresolvedBlocker)
+      const recommendationEligible = recommendationActive && !unresolvedBlocker && !manualRequired
       const dimensions = detectDimensions(combined)
-      const focus = atLimit || ready ? [] : buildFocusHints(dimensions, [], session?.task ?? task)
+      const focus = (recommendationActive ? (!unresolvedBlocker || atLimit) : (atLimit || ready))
+        ? []
+        : buildFocusHints(dimensions, [], session?.task ?? task)
+
+      const revBeforeAwait = deps.gates.revisionOf(agentId)
+      const sessionBeforeAwait = session
 
       let memoryContext = ''
       if (config.memoryEnabled) {
@@ -193,27 +326,87 @@ export function createGrillStartTool(deps: GrillStartDeps): ToolDefinition {
         }
       }
 
+      const currentGateRevision = deps.gates.revisionOf(agentId)
+      if (currentGateRevision !== revBeforeAwait || deps.sessions.get(agentId) !== sessionBeforeAwait) {
+        if (sessionBeforeAwait) sessionBeforeAwait.recommendationReady = false
+        return {
+          verdict: 'needs-clarification',
+          skip: false,
+          reason: 'stale-task',
+          gate_state: deps.gates.stateOf(agentId),
+          recommendation_mode: config.recommendationMode,
+          effective_recommendation_categories: effectiveCategories,
+          recommendation_eligible: false,
+          hint: '读取记忆期间任务已变更或被新消息打断，本次判定已作废；请针对当前任务重新调用 grill_start。',
+          version: PLUGIN_VERSION,
+        }
+      }
+
+      if (session) {
+        session.recommendationReady = recommendationEligible
+      }
+
+      let reason: string
+      let bodyHint: string
+      let confirmationRequired = true
+
+      if (recommendationActive) {
+        if (unresolvedBlocker) {
+          if (atLimit) {
+            reason = 'max-rounds-reached'
+            bodyHint = '停止追问，把需求及尚未验证的假设整理成四段清单，调用 grill_confirm；确认前不得开工。'
+          } else {
+            reason = mode === 'drift-check' ? judged.reason : evaluated.reason
+            bodyHint = '只问缺关键事实的阻塞项，不要对已启用的低风险类别重复提问，不要把推荐写进 answer_summary。结合已知偏好和已有答案，只问仍影响方案的歧义；问题数是上限，不必凑数。每轮回答后用 continue 记录答案摘要与实际问过的维度。'
+          }
+        } else if (manualRequired) {
+          reason = 'confirmation-required'
+          bodyHint = '用户要求人工确认或先看方案，不得按推荐自动放行；请整理目标/范围/约束/验收标准四段清单并调用人工 grill_confirm（不要传 decision_mode:"recommended"）。'
+        } else {
+          reason = 'recommendations-pending'
+          bodyHint = '当前任务无未解阻塞且存在待评估推荐决定，请直接调用 grill_confirm(decision_mode:"recommended", task_id, task_version, requirements, recommendations) 进行无卡推荐结算；不要把推荐写进 answer_summary。若存在超出已启用类别或无法满足封闭决策校验的决定，请改为人工 grill_confirm。'
+          confirmationRequired = false
+        }
+      } else {
+        reason = atLimit
+          ? 'max-rounds-reached'
+          : ready
+            ? 'confirmation-required'
+            : preserving
+              ? 'clarification-pending'
+              : judged.reason
+        bodyHint = judged.reason === 'inquiry' && preserving
+          ? '先回答当前咨询，再回到待确认任务；咨询不代表同意开工。'
+          : manualGateRequired && !unresolvedBlocker
+            ? '用户要求人工确认或先看方案，请整理目标/范围/约束/验收标准四段清单并调用人工 grill_confirm；确认前不得开工。'
+            : atLimit || ready || focus.length === 0
+              ? '停止追问，把需求及尚未验证的假设整理成四段清单，调用 grill_confirm；确认前不得开工。'
+              : '结合已知偏好和已有答案，只问仍影响方案的歧义；问题数是上限，不必凑数。每轮回答后用 continue 记录答案摘要与实际问过的维度。'
+      }
+
+      const taskId = session?.taskId ?? activeSession?.taskId ?? `${agentId}:${startedAt}`
+
       return {
         verdict: 'needs-clarification',
         skip: false,
-        reason: atLimit ? 'max-rounds-reached' : ready ? 'confirmation-required' : preserving ? 'clarification-pending' : judged.reason,
+        reason,
         score: evaluated.score,
         memory_context: memoryContext,
         focus_hints: focus,
-        hint: `${judged.reason === 'inquiry' && preserving
-          ? '先回答当前咨询，再回到待确认任务；咨询不代表同意开工。'
-          : atLimit || ready || focus.length === 0
-            ? '停止追问，把需求及尚未验证的假设整理成四段清单，调用 grill_confirm；确认前不得开工。'
-            : '结合已知偏好和已有答案，只问仍影响方案的歧义；问题数是上限，不必凑数。每轮回答后用 continue 记录答案摘要与实际问过的维度。'}\n\n${buildDispatchReminder()}`,
+        hint: `${bodyHint}\n\n${buildDispatchReminder()}`,
         gate_state: 'closed',
         max_rounds: config.maxRounds,
         max_questions_per_round: config.maxQuestionsPerRound,
         intensity: config.intensity,
         mode,
-        task_id: `${agentId}:${startedAt}`,
+        task_id: taskId,
+        task_version: currentGateRevision,
+        recommendation_mode: config.recommendationMode,
+        effective_recommendation_categories: effectiveCategories,
+        recommendation_eligible: recommendationEligible,
         rounds_used: roundsUsed,
         clarification_history: session?.history ?? [],
-        confirmation_required: true,
+        confirmation_required: confirmationRequired,
         version: PLUGIN_VERSION,
         ...(previous?.task ? { previous_task: previous.task } : {}),
       }

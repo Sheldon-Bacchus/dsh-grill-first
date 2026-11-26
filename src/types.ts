@@ -9,8 +9,8 @@
 export interface GrillSessionHeader {
   /** 会话工作区（项目层记忆的落点）。 */
   cwd?: string
-  /** `subagent` 表示这是派生出来的子会话。 */
-  origin?: 'subagent'
+  /** `subagent` 表示这是派生出来的子会话（注意：不用 `parentSession` 判子代理，因为普通 fork 也可能保留 `parentSession`）。 */
+  origin?: string
   delegationDepth?: number
 }
 
@@ -115,10 +115,11 @@ export interface UserQuestionsService {
   ask(request: AskUserQuestionRequest): Promise<AskUserQuestionAnswer>
 }
 
-/** `ctx.agents` 服务（用于区分"能跟人对话的根 agent"与子 agent）。 */
+/** `ctx.agents` 服务（用于区分"能跟人对话的根 agent"与子 agent；真实 DSH 0.2.2-rc.5 提供 get/list，旧版/测试桩可能提供 roots）。 */
 export interface AgentsService {
-  roots(): GrillAgent[]
-  list(): GrillAgent[]
+  get?(id: string): GrillAgent | undefined
+  list?(): GrillAgent[]
+  roots?(): GrillAgent[]
 }
 
 /** 宿主 logger 的最小面。 */

@@ -37,6 +37,11 @@ export interface JudgeResult {
 export declare const DEFAULT_BYPASS_KEYWORDS: readonly string[];
 /** 缺失维度对应的追问提示。 */
 export declare const DIMENSION_HINTS: Record<keyof DimensionHit, string>;
+/**
+ * 独立检测任务文本中缺失的关键阻塞事实（如外发缺收件人、发布/部署缺渠道环境、显式缺目标文件）。
+ * 只针对明显缺失且影响执行安全/正确性的关键事实，避免误伤普通开发任务。
+ */
+export declare function detectMissingCriticalFacts(text: string): string[];
 /** 统计文本命中的维度。 */
 export declare function detectDimensions(text: string): DimensionHit;
 /** 已命中的维度个数。 */

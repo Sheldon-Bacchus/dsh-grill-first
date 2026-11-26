@@ -1,4 +1,5 @@
 import { listPreferences, mutatePreference } from '../memory/store.js';
+import { RECOMMENDATION_MODES, isKnownRecommendationCategory } from '../config.js';
 export const SETTINGS_CHANNEL = '/dsh-grill-first-settings';
 function invalid(message) { throw Object.assign(new Error(message), { code: 'INVALID_INPUT' }); }
 function object(value) {
@@ -20,12 +21,25 @@ export function validateSettingsPatch(value) {
     const enums = {
         intensity: ['gentle', 'standard', 'grill'], gateMode: ['off', 'warn', 'strict', 'ask'],
         memoryScope: ['project', 'global'], researchMode: ['off', 'auto', 'always'], researchDepth: ['quick', 'deep'],
+        recommendationMode: RECOMMENDATION_MODES,
     };
-    keys(patch, ['enabled', 'memoryEnabled', 'maxRounds', 'maxQuestionsPerRound', 'bypassKeywords', ...Object.keys(enums)]);
+    keys(patch, ['enabled', 'memoryEnabled', 'maxRounds', 'maxQuestionsPerRound', 'bypassKeywords', 'recommendationCategories', ...Object.keys(enums)]);
     for (const [key, value] of Object.entries(patch)) {
         if (key === 'bypassKeywords') {
             if (!Array.isArray(value) || value.length < 1 || value.length > 50 || value.some(item => typeof item !== 'string' || !item.trim() || item.length > 100))
                 invalid('跳过词须为1至50个非空短词');
+        }
+        else if (key === 'recommendationCategories') {
+            if (!Array.isArray(value))
+                invalid('自动推荐类别必须是数组');
+            const seen = new Set();
+            for (const item of value) {
+                if (!isKnownRecommendationCategory(item))
+                    invalid('包含未知的自动推荐类别');
+                if (seen.has(item))
+                    invalid('自动推荐类别不能重复');
+                seen.add(item);
+            }
         }
         else if (key === 'enabled' || key === 'memoryEnabled') {
             if (typeof value !== 'boolean')
@@ -89,7 +103,7 @@ export function createSettingsHandler(connection, settings, workspaces, options)
                 keys(data, []);
                 const current = descriptor();
                 // Only expose the fields managed by this page, not other plugin internals.
-                const config = Object.fromEntries(Object.entries(object(current.value)).filter(([key]) => ['enabled', 'intensity', 'gateMode', 'maxRounds', 'maxQuestionsPerRound', 'memoryEnabled', 'memoryScope', 'researchMode', 'researchDepth', 'bypassKeywords'].includes(key)));
+                const config = Object.fromEntries(Object.entries(object(current.value)).filter(([key]) => ['enabled', 'intensity', 'gateMode', 'maxRounds', 'maxQuestionsPerRound', 'memoryEnabled', 'memoryScope', 'researchMode', 'researchDepth', 'bypassKeywords', 'recommendationMode', 'recommendationCategories'].includes(key)));
                 value = { config, revision: current.revision, workspaces: workspaces.list().map(({ id, title }) => ({ id, title })) };
             }
             else if (endpoint === 'save') {

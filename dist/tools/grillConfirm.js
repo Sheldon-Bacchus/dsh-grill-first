@@ -1,5 +1,7 @@
+import { judgeTask } from '../judge/heuristics.js';
 import { saveHistory, savePreference, saveProjectContext } from '../memory/store.js';
 import { buildDeliveryReminder } from '../prompt/reminders.js';
+import { buildSafeAuditTokens, hasManualReviewSignal, validateRecommendationBatch, } from '../recommendation.js';
 import { textOutput } from './grillStart.js';
 /** grill_confirm 的参数 schema。 */
 const PARAMETERS = {
@@ -18,6 +20,48 @@ const PARAMETERS = {
             type: 'boolean',
             description: '仅用于兜底通道：已经用 ask_user_question 向用户展示过该清单并得到明确同意时传 true，直接开工；正常情况下不要传，让用户在本工具的确认卡片里选。',
         },
+        decision_mode: {
+            type: 'string',
+            enum: ['manual', 'recommended'],
+            description: '默认 manual（人工确认卡片）；recommended 表示按当前推荐策略独立结算低风险项（不弹卡、不写用户确认记忆）。',
+        },
+        task_id: {
+            type: 'string',
+            description: '当前待结算任务的 task_id（推荐结算必填）。',
+        },
+        task_version: {
+            type: 'number',
+            description: 'grill_start 返回的 task_version（门禁版本，推荐结算必填，用于防过期请求）。',
+        },
+        recommendations: {
+            type: 'array',
+            description: '封闭决策类型的待采用推荐项列表（推荐结算必填）。',
+            items: {
+                type: 'object',
+                properties: {
+                    id: { type: 'string' },
+                    category: { type: 'string' },
+                    decision_type: { type: 'string' },
+                    options: {
+                        type: 'array',
+                        items: {
+                            type: 'object',
+                            properties: {
+                                id: { type: 'string' },
+                                label: { type: 'string' },
+                            },
+                            required: ['id', 'label'],
+                            additionalProperties: false,
+                        },
+                    },
+                    recommended_option_id: { type: 'string' },
+                    reason: { type: 'string' },
+                    impact: { type: 'string' },
+                },
+                required: ['id', 'category', 'decision_type', 'options', 'recommended_option_id', 'reason', 'impact'],
+                additionalProperties: false,
+            },
+        },
     },
     required: ['requirements'],
     additionalProperties: false,
@@ -27,6 +71,12 @@ const OUTPUT_SCHEMA = {
     type: 'object',
     properties: {
         confirmed: { type: 'boolean' },
+        released: { type: 'boolean' },
+        decision: { type: 'string', enum: ['manual', 'recommended', 'autonomous'] },
+        task_id: { type: 'string' },
+        recommendation_mode: { type: 'string' },
+        applied: { type: 'array' },
+        summary: { type: 'string' },
         final_requirements: { type: 'string' },
         feedback: { type: 'string', description: '用户选择"要改"时的修改意见' },
         needs_user_confirmation: { type: 'boolean' },
@@ -49,6 +99,15 @@ const PROJECT_CONTEXT_LIMIT = 300;
 const CARD_TITLE_LIMIT = 60;
 /** 确认卡片正文（`detail` 字段）的长度上限：正文在可滚动区里渲染，超长必须拒绝并要求摘要。 */
 const CARD_DETAIL_LIMIT = 6000;
+/** `grill_confirm` 推荐分支合法顶层参数键集合（防透传 `lowRisk` / `blockers` / `path` / `confirmed` 等字段）。 */
+const ALLOWED_RECOMMENDED_ARG_KEYS = new Set([
+    'requirements',
+    'preferences_learned',
+    'decision_mode',
+    'task_id',
+    'task_version',
+    'recommendations',
+]);
 /** 卡片正文末尾的使用提示。 */
 const CARD_DETAIL_HINT = '确认后我才会开工；选择"要改"时请在最下面的输入框里写清要改哪里。';
 /** 取首行作为任务摘要。 */
@@ -73,7 +132,7 @@ export function createGrillConfirmTool(deps) {
     const fallback = new Map();
     return {
         name: 'grill_confirm',
-        description: '把整理好的中文需求清单交给用户确认（grill-first 插件）。用户确认后本次任务放行，并把确认过的内容写入两层记忆；用户选"要改"时返回 feedback，据此修订后再次调用。',
+        description: '把整理好的中文需求清单交给用户确认（grill-first 插件）。用户确认后本次任务放行，并把确认过的内容写入两层记忆；用户选"要改"时返回 feedback，据此修订后再次调用。启用推荐模式且符合条件时，可通过 decision_mode="recommended" 独立结算低风险项（不弹卡、不写用户确认记忆）。',
         parameters: PARAMETERS,
         output: textOutput(OUTPUT_SCHEMA),
         isConcurrencySafe: () => false,
@@ -87,6 +146,202 @@ export function createGrillConfirmTool(deps) {
                 : [];
             if (!config.enabled) {
                 return { confirmed: true, skipped: true, reason: 'disabled' };
+            }
+            if (config.recommendationMode === 'autonomous') {
+                deps.sessions.end(agentId);
+                deps.gates.open(agentId, 'autonomous');
+                return {
+                    confirmed: false,
+                    released: true,
+                    skipped: true,
+                    decision: 'autonomous',
+                    reason: 'autonomous-mode',
+                    recommendation_mode: 'autonomous',
+                    ...(requirements !== '' ? { final_requirements: requirements } : {}),
+                    instructions: '当前为全权自主模式（autonomous），已直接放行，无需等待用户确认；可直接执行或自由开 Sub / Team。',
+                };
+            }
+            if (args.decision_mode === 'recommended' || args.recommendations !== undefined) {
+                if (args.decision_mode !== 'recommended') {
+                    return {
+                        confirmed: false,
+                        released: false,
+                        reason: 'invalid-recommendation',
+                        instructions: '推荐结算必须显式传入 decision_mode: "recommended"。',
+                    };
+                }
+                if (args.confirmed === true) {
+                    return {
+                        confirmed: false,
+                        released: false,
+                        reason: 'policy-blocked',
+                        instructions: '推荐结算包含不支持或受限的顶层参数，已拒绝。',
+                    };
+                }
+                if (rawArgs && typeof rawArgs === 'object' && !Array.isArray(rawArgs)) {
+                    for (const key of Object.keys(rawArgs)) {
+                        if (!ALLOWED_RECOMMENDED_ARG_KEYS.has(key)) {
+                            return {
+                                confirmed: false,
+                                released: false,
+                                reason: 'policy-blocked',
+                                instructions: '推荐结算包含不支持或受限的顶层参数，已拒绝。',
+                            };
+                        }
+                    }
+                }
+                if (exec?.signal?.aborted) {
+                    return { confirmed: false, released: false, reason: 'confirmation-cancelled' };
+                }
+                if (requirements === '') {
+                    return {
+                        confirmed: false,
+                        released: false,
+                        reason: 'empty-requirements',
+                        instructions: 'requirements 不能为空：请把四段式需求清单全文放进 requirements 参数，再调用一次。',
+                    };
+                }
+                if (requirements.length > CARD_DETAIL_LIMIT) {
+                    return {
+                        confirmed: false,
+                        released: false,
+                        reason: 'requirements-too-long',
+                        instructions: `清单超过 ${CARD_DETAIL_LIMIT} 字，未展示也未授权。请先分段整理摘要，保留全部约束和验收条件，再提交完整四段清单确认。`,
+                    };
+                }
+                // 先读取当前门禁版本与会话，避免在校验过期前改动门禁或覆盖已有人工放行结果。
+                const currentGateRevision = deps.gates.revisionOf(agentId);
+                const session = deps.sessions.get(agentId);
+                const reqTaskId = typeof args.task_id === 'string' ? args.task_id.trim() : '';
+                if (reqTaskId === '') {
+                    return {
+                        confirmed: false,
+                        released: false,
+                        reason: 'stale-decision',
+                        instructions: '推荐结算缺少当前 task_id。',
+                    };
+                }
+                if (deps.sessions.getSettled(agentId, reqTaskId)) {
+                    return {
+                        confirmed: false,
+                        released: false,
+                        reason: 'stale-decision',
+                        instructions: '该任务版本已结算，拒绝重复或过期推荐请求。',
+                    };
+                }
+                const sessionTaskId = session ? (session.taskId ?? `${agentId}:${session.startedAt}`) : '';
+                if (!session || sessionTaskId !== reqTaskId) {
+                    return {
+                        confirmed: false,
+                        released: false,
+                        reason: 'stale-decision',
+                        instructions: '任务已变更或不存在，旧推荐已作废。',
+                    };
+                }
+                if (typeof args.task_version !== 'number'
+                    || !Number.isFinite(args.task_version)
+                    || args.task_version !== currentGateRevision) {
+                    return {
+                        confirmed: false,
+                        released: false,
+                        reason: 'stale-decision',
+                        instructions: '推荐结算缺少有效的 task_version 或任务门禁版本已变化，旧推荐已作废。',
+                    };
+                }
+                if (session.gateRevision !== undefined && session.gateRevision !== currentGateRevision) {
+                    return {
+                        confirmed: false,
+                        released: false,
+                        reason: 'stale-decision',
+                        instructions: '任务状态已变更，旧推荐已作废。',
+                    };
+                }
+                const keepGateClosed = () => {
+                    if (deps.gates.stateOf(agentId) !== 'closed')
+                        deps.gates.close(agentId);
+                };
+                const clarificationAnswers = (session.history ?? []).map((round) => round.answer);
+                if (session.manualRequired
+                    || hasManualReviewSignal(session.task)
+                    || hasManualReviewSignal(requirements)
+                    || clarificationAnswers.some((entry) => hasManualReviewSignal(entry))) {
+                    keepGateClosed();
+                    return {
+                        confirmed: false,
+                        released: false,
+                        reason: 'manual-confirmation-required',
+                        instructions: '用户要求人工确认或先看方案，不得按推荐自动放行。',
+                    };
+                }
+                if (!session.pendingRecommendations || !session.recommendationReady) {
+                    keepGateClosed();
+                    return {
+                        confirmed: false,
+                        released: false,
+                        reason: 'needs-clarification',
+                        instructions: '当前任务尚未经 grill_start 进入待评估推荐就绪态，不能直接推荐结算。',
+                    };
+                }
+                const combined = [session.task, ...clarificationAnswers].join('\n');
+                const evaluated = judgeTask({ text: combined, mode: 'new-task', intensity: config.intensity, bypassKeywords: [] });
+                if (evaluated.verdict !== 'clear') {
+                    keepGateClosed();
+                    return {
+                        confirmed: false,
+                        released: false,
+                        reason: 'needs-clarification',
+                        instructions: '任务仍缺关键事实，请先只问阻塞项，不能靠推荐跳过澄清。',
+                    };
+                }
+                if (!Array.isArray(args.recommendations)) {
+                    keepGateClosed();
+                    return {
+                        confirmed: false,
+                        released: false,
+                        reason: 'invalid-recommendation',
+                        instructions: 'recommendations 必须是非空推荐项数组。',
+                    };
+                }
+                const validation = validateRecommendationBatch({
+                    items: args.recommendations,
+                    config,
+                    task: session.task,
+                    requirements,
+                    clarificationAnswers,
+                });
+                if (!validation.ok) {
+                    keepGateClosed();
+                    return {
+                        confirmed: false,
+                        released: false,
+                        reason: validation.reason,
+                        instructions: validation.message,
+                    };
+                }
+                deps.sessions.markSettled(agentId, reqTaskId, 'recommended');
+                deps.sessions.end(agentId);
+                deps.gates.open(agentId, 'recommended');
+                const decisions = buildSafeAuditTokens(validation.applied).join(',');
+                deps.logger?.warn?.(`[grill-first] 需求门禁已按推荐放行（decision=recommended, task_id=${reqTaskId}, mode=${config.recommendationMode}, decisions=${decisions}, agent=${agentId}）`);
+                return {
+                    confirmed: false,
+                    released: true,
+                    decision: 'recommended',
+                    task_id: reqTaskId,
+                    recommendation_mode: config.recommendationMode,
+                    applied: validation.applied,
+                    summary: validation.summary,
+                    final_requirements: requirements,
+                    instructions: buildDeliveryReminder(),
+                };
+            }
+            if (args.decision_mode !== undefined && args.decision_mode !== 'manual') {
+                return {
+                    confirmed: false,
+                    released: false,
+                    reason: 'invalid-recommendation',
+                    instructions: '不支持的 decision_mode，仅支持 manual 或 recommended。',
+                };
             }
             const previousGateRevision = deps.gates.revisionOf(agentId);
             deps.gates.close(agentId);
@@ -111,12 +366,18 @@ export function createGrillConfirmTool(deps) {
             const gateRevision = deps.gates.revisionOf(agentId);
             const isCurrent = () => deps.gates.revisionOf(agentId) === gateRevision && deps.sessions.get(agentId) === session && JSON.stringify(session) === sessionRevision;
             const stale = () => ({ confirmed: false, reason: 'stale-confirmation', instructions: '任务已经变化，请展示当前任务的清单重新确认。' });
-            /** 确认后的落库动作：历史 + 全局偏好 + 项目背景，然后放行门禁。 */
+            /** 确认后的原子结算与落库动作：先同步校验并结算放行，再落库历史 + 全局偏好 + 项目背景。 */
             const accept = async (channel) => {
                 if (!isCurrent())
                     return stale();
                 if (exec?.signal?.aborted)
                     return { confirmed: false, reason: 'confirmation-cancelled' };
+                const currentTaskId = session ? (session.taskId ?? `${agentId}:${session.startedAt}`) : '';
+                if (currentTaskId)
+                    deps.sessions.markSettled(agentId, currentTaskId, 'manual');
+                deps.sessions.end(agentId);
+                deps.gates.open(agentId, 'manual');
+                deps.logger?.warn?.(`[grill-first] 需求已确认（通道=${channel}，agent=${agentId}）`);
                 const saved = { history: false, preferences: 0, project_context: false };
                 if (config.memoryEnabled) {
                     const root = deps.workspaceRoot(exec?.agent);
@@ -136,13 +397,6 @@ export function createGrillConfirmTool(deps) {
                         deps.logger?.warn(`[grill-first] 写入记忆失败：${error instanceof Error ? error.message : String(error)}`);
                     }
                 }
-                if (!isCurrent())
-                    return stale();
-                if (exec?.signal?.aborted)
-                    return { confirmed: false, reason: 'confirmation-cancelled' };
-                deps.sessions.end(agentId);
-                deps.gates.open(agentId);
-                deps.logger?.warn?.(`[grill-first] 需求已确认（通道=${channel}，agent=${agentId}）`);
                 return { confirmed: true, final_requirements: requirements, instructions: buildDeliveryReminder(), saved };
             };
             // 兜底声明只在本任务的同一清单确实进入兜底流程后有效。
@@ -214,6 +468,10 @@ export function createGrillConfirmTool(deps) {
             }
             if (selected.length !== 1 || selected[0] !== '要改') {
                 return { confirmed: false, reason: 'confirmation-not-received', needs_user_confirmation: true, requirements, instructions: '未收到有效确认，请重新展示完整清单并等待明确选择。' };
+            }
+            if (session) {
+                session.gateRevision = gateRevision;
+                session.recommendationReady = false;
             }
             const rounds = deps.sessions.get(agentId)?.rounds ?? 0;
             const maxRounds = config.maxRounds;

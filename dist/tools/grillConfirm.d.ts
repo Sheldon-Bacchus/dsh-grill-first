@@ -1,17 +1,19 @@
 /**
- * `grill_confirm` 工具（R3/R5）：把整理好的需求清单交给用户确认，确认后才放行。
+ * `grill_confirm` 工具（R3/R5）：把整理好的需求清单交给用户确认，确认后才放行；
+ * 在启用推荐模式且无未解阻塞时，也支持 `decision_mode: "recommended"` 的独立无卡推荐结算。
  *
- * 两条确认通道：
+ * 两条人工确认通道：
  * 1. 结构化提问（`ctx.userQuestions.ask`）——用户直接选"确认 / 要改"，最可靠；
  * 2. 兜底通道——`userQuestions` 不可用（或对子 agent 抛 DELEGATED_CALLER）时，
  *    返回 needs_user_confirmation，让模型改用内置 `ask_user_question` 问用户，
  *    用户同意后再调用 `grill_confirm(confirmed:true)`。
  *
- * R3 红线：需求清单只进记忆的 history 字段，绝不写任何需求文件。
+ * R3 红线：需求清单只进记忆的 history 字段，绝不写任何需求文件；推荐结算绝不写用户确认记忆。
  */
-import type { GrillConfig, MemoryScope } from '../config.js';
+import type { GrillConfig, MemoryScope, RecommendationMode } from '../config.js';
 import type { GateRegistry } from '../gate/preExecute.js';
 import type { GrillAgent, ToolDefinition, UserQuestionsService } from '../types.js';
+import { type AppliedRecommendation } from '../recommendation.js';
 import type { SessionRegistry } from './sessions.js';
 /** 工具依赖（由 index.ts 装配注入）。 */
 export interface GrillConfirmDeps {
@@ -31,6 +33,12 @@ export interface GrillConfirmDeps {
 /** grill_confirm 的返回体。 */
 export interface GrillConfirmResult {
     confirmed: boolean;
+    released?: boolean;
+    decision?: 'manual' | 'recommended' | 'autonomous';
+    task_id?: string;
+    recommendation_mode?: RecommendationMode;
+    applied?: AppliedRecommendation[];
+    summary?: string;
     final_requirements?: string;
     feedback?: string;
     requirements?: string;

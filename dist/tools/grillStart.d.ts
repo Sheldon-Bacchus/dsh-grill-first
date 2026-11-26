@@ -4,7 +4,7 @@
  * - clear：放行（门禁置 open），模型直接开工；
  * - needs-clarification：门禁置 closed，并返回记忆摘要、追问方向与轮次上限。
  */
-import type { GrillConfig, MemoryScope } from '../config.js';
+import { type GrillConfig, type MemoryScope, type RecommendationCategory, type RecommendationMode } from '../config.js';
 import type { GateRegistry } from '../gate/preExecute.js';
 import type { GrillAgent, ToolDefinition } from '../types.js';
 import type { SessionRegistry } from './sessions.js';
@@ -35,6 +35,10 @@ export interface GrillStartResult {
     intensity?: string;
     mode?: string;
     task_id?: string;
+    task_version?: number;
+    recommendation_mode?: RecommendationMode;
+    effective_recommendation_categories?: RecommendationCategory[];
+    recommendation_eligible?: boolean;
     previous_task?: string;
     hint?: string;
     /** 已经追问过的轮数（达到 maxRounds 后不再追问）。 */

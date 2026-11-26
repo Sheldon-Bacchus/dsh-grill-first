@@ -14,6 +14,16 @@ const gateModeSchema = z
     .default('warn');
 /** 追问力度 schema。 */
 const intensitySchema = z.union([z.const('gentle'), z.const('standard'), z.const('grill')]).default('standard');
+/** 开工决策推荐模式 schema。 */
+const recommendationModeSchema = z
+    .union([z.const('manual'), z.const('conservative'), z.const('standard'), z.const('custom'), z.const('autonomous')])
+    .default('manual');
+/** 开工决策推荐类别 schema。 */
+const recommendationCategorySchema = z.union([
+    z.const('presentation'),
+    z.const('draft_wording'),
+    z.const('draft_label'),
+]);
 /** 插件配置 schema：改了这里，设置界面与 cordis.yml 校验同时生效。 */
 export const Config = z.object({
     enabled: z.boolean().default(true).description('总开关：关闭后任何任务都不再追问，也不拦截工具。'),
@@ -38,4 +48,9 @@ export const Config = z.object({
         .union([z.const('project'), z.const('global')])
         .default('project')
         .description('项目层记忆落点：project 写进当前工作区的 .dsh/grill-first/，global 写进插件家目录。'),
+    recommendationMode: recommendationModeSchema.description('开工决策：manual 手动 / conservative 保守（排版与格式）/ standard 标准（排版与格式、非公开草稿措辞、非公开草稿显示名称）/ custom 自定义（仅选中的类别；全不勾选就不代选）/ autonomous 全权自主（由模型直接决定方案并自由开 Sub/Team，不弹确认卡）。'),
+    recommendationCategories: z
+        .array(recommendationCategorySchema)
+        .default([])
+        .description('自定义允许代选类别（仅自定义模式生效，默认全不选）：presentation 排版与格式 / draft_wording 非公开草稿措辞 / draft_label 非公开草稿显示名称。'),
 });

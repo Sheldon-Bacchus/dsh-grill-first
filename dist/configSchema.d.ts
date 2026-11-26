@@ -19,6 +19,8 @@ export declare const Config: z<Schemastery.ObjectS<NoInfer<{
     researchDepth: z<"quick" | "deep", "quick" | "deep", "defined">;
     memoryEnabled: z<boolean, boolean, "defined">;
     memoryScope: z<"project" | "global", "project" | "global", "defined">;
+    recommendationMode: z<"standard" | "manual" | "conservative" | "custom" | "autonomous", "standard" | "manual" | "conservative" | "custom" | "autonomous", "defined">;
+    recommendationCategories: z<("presentation" | "draft_wording" | "draft_label")[], ("presentation" | "draft_wording" | "draft_label")[], "defined">;
 }>>, Schemastery.ObjectT<NoInfer<{
     enabled: z<boolean, boolean, "defined">;
     gateMode: z<"off" | "warn" | "strict" | "ask", "off" | "warn" | "strict" | "ask", "defined">;
@@ -30,4 +32,6 @@ export declare const Config: z<Schemastery.ObjectS<NoInfer<{
     researchDepth: z<"quick" | "deep", "quick" | "deep", "defined">;
     memoryEnabled: z<boolean, boolean, "defined">;
     memoryScope: z<"project" | "global", "project" | "global", "defined">;
+    recommendationMode: z<"standard" | "manual" | "conservative" | "custom" | "autonomous", "standard" | "manual" | "conservative" | "custom" | "autonomous", "defined">;
+    recommendationCategories: z<("presentation" | "draft_wording" | "draft_label")[], ("presentation" | "draft_wording" | "draft_label")[], "defined">;
 }>>, "plain">;

@@ -1,5 +1,6 @@
 import type { GrillContext } from '../types.js'
 import { listPreferences, mutatePreference, type PreferenceMutation } from '../memory/store.js'
+import { RECOMMENDATION_MODES, isKnownRecommendationCategory } from '../config.js'
 
 export const SETTINGS_CHANNEL = '/dsh-grill-first-settings'
 /** Existing Connection RPC extension; this channel is never registered as an LLM tool. */
@@ -40,11 +41,20 @@ export function validateSettingsPatch(value: unknown): Record<string, unknown> {
   const enums: Record<string, readonly string[]> = {
     intensity: ['gentle', 'standard', 'grill'], gateMode: ['off', 'warn', 'strict', 'ask'],
     memoryScope: ['project', 'global'], researchMode: ['off', 'auto', 'always'], researchDepth: ['quick', 'deep'],
+    recommendationMode: RECOMMENDATION_MODES,
   }
-  keys(patch, ['enabled', 'memoryEnabled', 'maxRounds', 'maxQuestionsPerRound', 'bypassKeywords', ...Object.keys(enums)])
+  keys(patch, ['enabled', 'memoryEnabled', 'maxRounds', 'maxQuestionsPerRound', 'bypassKeywords', 'recommendationCategories', ...Object.keys(enums)])
   for (const [key, value] of Object.entries(patch)) {
     if (key === 'bypassKeywords') {
       if (!Array.isArray(value) || value.length < 1 || value.length > 50 || value.some(item => typeof item !== 'string' || !item.trim() || item.length > 100)) invalid('跳过词须为1至50个非空短词')
+    } else if (key === 'recommendationCategories') {
+      if (!Array.isArray(value)) invalid('自动推荐类别必须是数组')
+      const seen = new Set<string>()
+      for (const item of value) {
+        if (!isKnownRecommendationCategory(item)) invalid('包含未知的自动推荐类别')
+        if (seen.has(item)) invalid('自动推荐类别不能重复')
+        seen.add(item)
+      }
     } else if (key === 'enabled' || key === 'memoryEnabled') { if (typeof value !== 'boolean') invalid(`${key} 必须是布尔值`) }
     else if (key === 'maxRounds' || key === 'maxQuestionsPerRound') {
       if (!Number.isInteger(value) || (value as number) < 1 || (value as number) > (key === 'maxRounds' ? 10 : 6)) invalid(`${key} 超出范围`)
@@ -93,7 +103,7 @@ export function createSettingsHandler(connection: Connection, settings: Settings
         keys(data, [])
         const current = descriptor()
         // Only expose the fields managed by this page, not other plugin internals.
-        const config = Object.fromEntries(Object.entries(object(current.value)).filter(([key]) => ['enabled', 'intensity', 'gateMode', 'maxRounds', 'maxQuestionsPerRound', 'memoryEnabled', 'memoryScope', 'researchMode', 'researchDepth', 'bypassKeywords'].includes(key)))
+        const config = Object.fromEntries(Object.entries(object(current.value)).filter(([key]) => ['enabled', 'intensity', 'gateMode', 'maxRounds', 'maxQuestionsPerRound', 'memoryEnabled', 'memoryScope', 'researchMode', 'researchDepth', 'bypassKeywords', 'recommendationMode', 'recommendationCategories'].includes(key)))
         value = { config, revision: current.revision, workspaces: workspaces.list().map(({ id, title }) => ({ id, title })) }
       } else if (endpoint === 'save') {
         keys(data, ['patch', 'revision'])

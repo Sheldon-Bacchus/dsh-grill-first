@@ -2,9 +2,9 @@
 
 > A DSH (DeepSeek Harness) plugin that clarifies vague requests and asks you to confirm the requirements before starting work.
 
-[中文](./README.md) · [Configuration](#configuration) · [Two-layer memory](#two-layer-memory)
+[中文](./README.md) · [Startup decisions](#startup-decisions--execute-by-recommendation) · [Configuration](#configuration) · [Two-layer memory](#two-layer-memory)
 
-This document describes V1 (1.0.x). It is published on [npm](https://www.npmjs.com/package/dsh-grill-first) and pushed to the GitHub repository. Verification state: the automated suite (173 tests) passes, and the user confirmed on the real host page that both adding a preference and batch deletion work. The host login page cannot be entered by an automated browser, so these page operations have no screenshot record, only the user's confirmation.
+This document describes V1 (1.0.x) and the in-repo “execute by recommendation” extension. The V1 baseline is published on [npm](https://www.npmjs.com/package/dsh-grill-first) and pushed to the GitHub repository; for V1, the 173-test automated suite passed and the user confirmed on the real host page that adding a preference and batch deletion worked (without automated browser screenshots because the host login page blocks automated entry). The newly added “Startup decisions / Execute by recommendation” changes are currently source-level edits in this repository: full build/suite verification and real-host settings-page verification (with live UI checks and screenshots) remain to be performed after installation. Editing repository sources does not update a running installed copy.
 
 ## How it works
 
@@ -47,6 +47,37 @@ The gate applies to root agents. Read-only tools remain available; writes, comma
 
 Set `enabled: false` to disable clarification, gating and research. Default bypass keywords are `直接做`, `跳过提问`, `不用问` and `skip`. English keywords match word boundaries; Chinese keywords match substrings. Immediately preceding negation, such as `不要直接做` or `don't skip`, prevents that occurrence from acting as a bypass. These are keyword heuristics, not full semantic understanding; complex negation and quotations can still be misclassified.
 
+## Startup decisions / Execute by recommendation
+
+Alongside manual confirmation, users can configure once which minor decisions the assistant may resolve automatically when a unique, policy-compliant recommendation exists. When all remaining open items fall inside the enabled categories with a unique recommendation and no unresolved blockers, `grill_confirm`'s recommendation settlement branch (`decision_mode: "recommended"`) opens the gate directly—**no confirmation card, no waiting, and no simulated click**. On delivery, the response notes the auto-adopted choices in one sentence (omitted when nothing was auto-adopted).
+
+### Four decision modes
+
+Both fresh installs and upgrades default to `manual` (preserving the existing clarification and confirmation flow without adding cards to clear tasks); `custom` defaults to empty (`[]`). Switching modes preserves the saved custom list without copying `conservative` or `standard` categories into `recommendationCategories`. Unknown modes or categories never release the gate and never fall back to a looser mode.
+
+| Mode | Value | Auto-adoptable categories |
+|---|---|---|
+| Manual (default) | `manual` | None. Keeps existing clarification and confirmation flow without extra cards for clear tasks |
+| Conservative | `conservative` | `presentation` |
+| Standard | `standard` | `presentation`, `draft_wording`, `draft_label` |
+| Custom | `custom` | Only categories selected in `recommendationCategories`; none when empty (`[]`) |
+
+### Configurable categories and boundaries
+
+Common precondition: **easily reversible, without changing task scope, user constraints, acceptance criteria, or permissions**. Deleting/overwriting existing data, permission changes, payments, external sending/publishing, irreversible actions, Team/Sub delegation, and missing key facts (such as recipients or target files) **cannot be enabled for auto-adoption via `custom`**.
+
+| Category ID | Label | Allowed examples | Prohibited counter-examples (stay manual or block) |
+|---|---|---|---|
+| `presentation` | Layout & formatting (`排版与格式`) | Table vs. list for the same internal report; visual ordering of the same fields | Changing deliverable file type, dropping fields, altering data meaning, violating a specified template |
+| `draft_wording` | Non-public draft wording (`非公开草稿措辞`) | Choosing a non-factual heading or subheading on a known topic | Deciding facts, commitments, or amounts; altering legal or delivery meaning; finalizing external statements |
+| `draft_label` | Non-public draft display label (`非公开草稿显示名称`) | Picking an editable display title for a newly created draft in this turn | Renaming existing files; changing paths, public names, API identifiers, or referenced names |
+
+### Decision boundaries and separate receipt
+
+- **Manual priority & blocker-only follow-up**: Explicit user choices, requests for item-by-item confirmation, or requests to review a plan first always take precedence. When key facts are missing, ask only about blocking items and never write recommendations into `answer_summary`.
+- **Separate receipt & memory isolation**: Recommendation settlement returns a distinct receipt `{ confirmed: false, released: true, decision: "recommended", ... }` (manual approval remains `confirmed: true`), **without showing a card, waiting, or writing to user confirmation history or global preferences**, and never treats the setting as task-level authorization.
+- **Gate scope & no bypass of independent approvals**: Recommendation release only opens this plugin's own clarification gate for ordinary low-risk execution (so the plugin's `gateMode: ask` stops prompting for requirement confirmation on ordinary tools once that gate is open), while continuing to block privileged operations such as Team/Sub delegation and plugin management, and **never bypassing independent host or downstream tool approvals**.
+
 ## Installation
 
 Use DSH plugin management to install a selected version, or the CLI:
@@ -61,7 +92,7 @@ These are installation examples; the registry default is not necessarily the V1 
 
 ## Configuration
 
-V1 provides a separate **DSH Settings → 需求澄清 (Requirements clarification)** page with ten options for the current plugin instance. The page needs the host's settings, connection and workspace services; loading and saving must still be checked after deployment.
+The plugin provides a separate **DSH Settings → 需求澄清 (Requirements clarification)** page with twelve options for the current plugin instance. The page needs the host's settings, connection and workspace services; loading and saving must still be checked after deployment (the newly added “Startup decisions” options and recommendation flow have not yet been verified on the real host settings page with screenshots).
 
 | Option | Type | Default | Meaning |
 |---|---|---|---|
@@ -75,6 +106,8 @@ V1 provides a separate **DSH Settings → 需求澄清 (Requirements clarificati
 | `memoryScope` | `project` / `global` | `project` | Stores project memory in the workspace or global directory |
 | `researchMode` | `off` / `auto` / `always` | `auto` | Disabled / query when applicable / attempt a query on every tool invocation |
 | `researchDepth` | `quick` / `deep` | `quick` | Request budget and excerpt depth |
+| `recommendationMode` | `manual` / `conservative` / `standard` / `custom` | `manual` | Startup decision mode; both fresh installs and upgrades default to `manual` |
+| `recommendationCategories` | `("presentation" \| "draft_wording" \| "draft_label")[]` | `[]` | Auto-adoptable categories used only when `recommendationMode` is `custom` |
 
 All options are editable on the page, with one bypass keyword per line. The profile's `cordis.patch.yml` can also configure the plugin entry; specify only the options to override:
 
@@ -86,6 +119,10 @@ All options are editable on the page, with one bypass keyword per line. The prof
     maxRounds: 3
     researchMode: auto
     researchDepth: quick
+    recommendationMode: custom
+    recommendationCategories:
+      - presentation
+      - draft_wording
 ```
 
 ### Preference management

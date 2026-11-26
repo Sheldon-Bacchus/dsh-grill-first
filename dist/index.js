@@ -30,6 +30,8 @@ function installProtocolSection(ctx, config) {
         bypassKeywords: config.bypassKeywords,
         intensity: config.intensity,
         researchMode: config.researchMode,
+        recommendationMode: config.recommendationMode,
+        recommendationCategories: config.recommendationCategories,
     });
     ctx.inject(['systemPrompt'], (scoped) => {
         const systemPrompt = scoped.systemPrompt;
@@ -118,7 +120,7 @@ export function apply(ctx, rawConfig) {
     }
     installProtocolSection(ctx, config);
     registerGate(ctx, gates, {
-        mode: config.gateMode,
+        mode: config.recommendationMode === 'autonomous' ? 'off' : config.gateMode,
         // 新消息到达时先看一眼内容：追问/询问类不关门禁，否则"刚确认完又被拦"。
         shouldResetOnMessage: (text) => {
             const judged = judgeTask({
@@ -127,9 +129,9 @@ export function apply(ctx, rawConfig) {
                 bypassKeywords: config.bypassKeywords,
                 intensity: config.intensity,
             });
-            // 任务明确也不能让旧任务的确认卡继续有效；只保留咨询与普通追问。
+            // 任务明确或含跳过词也不能让旧任务的确认卡/待决推荐继续有效；只保留咨询与普通追问。
             // 此处只更新门禁代次，不清除会话答案；grill_start 再决定继续或切换任务。
-            return judged.reason !== 'follow-up' && judged.reason !== 'inquiry' && judged.reason !== 'bypass-keyword';
+            return judged.reason !== 'follow-up' && judged.reason !== 'inquiry';
         },
         onWarning: (toolName, agentId) => {
             ctx.logger?.warn(`[grill-first] 需求尚未确认（warn 模式，仅记录未拦截）：${toolName}（agent=${agentId}）`);

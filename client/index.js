@@ -70,6 +70,20 @@ window.__ModuleLoader__.load({
       ['researchMode', '调研模式', [['off', '关闭'], ['auto', '自动'], ['always', '始终']]],
       ['researchDepth', '调研深度', [['quick', '快速'], ['deep', '深入']]],
     ]
+    const recommendationModes = [
+      ['manual', '手动'],
+      ['conservative', '保守'],
+      ['standard', '标准'],
+      ['custom', '自定义'],
+      ['autonomous', '全权自主'],
+    ]
+    const recommendationCategoryDefs = [
+      ['presentation', '排版与格式'],
+      ['draft_wording', '非公开草稿措辞'],
+      ['draft_label', '非公开草稿显示名称'],
+    ]
+    const recommendationCategoryLabels = Object.fromEntries(recommendationCategoryDefs)
+    const recommendationHelpText = '启用的类别可以直接采用推荐，不用点选；超出范围的决定仍会按原流程处理；选「全权自主」则完全交给模型决定方案与开 Sub / Team。'
     async function rpc(connection, endpoint, payload, signal) {
       const result = await connection.rpc.call(channel, endpoint, payload, signal)
       if (!result.ok) throw Object.assign(new Error(result.error.message), { code: result.error.code })
@@ -176,6 +190,24 @@ window.__ModuleLoader__.load({
       const visible = (preferences?.preferences ?? []).filter(p => [p.text, p.source, ...p.tags].join(' ').toLocaleLowerCase().includes(search)).sort((a, b) => b.updated - a.updated)
       const selectedCount = visible.filter(p => selected.includes(p.id)).length
       const allSelected = visible.length > 0 && selectedCount === visible.length
+      const recommendationMode = recommendationModes.some(([mode]) => mode === config.recommendationMode) ? config.recommendationMode : 'manual'
+      const recommendationCategories = Array.isArray(config.recommendationCategories)
+        ? recommendationCategoryDefs.map(([id]) => id).filter(id => config.recommendationCategories.includes(id))
+        : []
+      const effectiveCategoryIds = recommendationMode === 'conservative'
+        ? ['presentation']
+        : (recommendationMode === 'standard' || recommendationMode === 'autonomous')
+          ? recommendationCategoryDefs.map(([id]) => id)
+          : recommendationMode === 'custom'
+            ? recommendationCategories
+            : []
+      const effectiveCategoryText = recommendationMode === 'autonomous'
+        ? '全权自主（模型自行决定方案，可自由开 Sub / Team，不弹确认卡）'
+        : effectiveCategoryIds.length > 0
+          ? effectiveCategoryIds.map(id => recommendationCategoryLabels[id]).join('、')
+          : recommendationMode === 'custom'
+            ? '无（不代选）'
+            : '无'
       const empty = (title, detail) => h('div', { className: 'gf-empty' }, h('div', { className: 'gf-empty-mark', 'aria-hidden': true }, '◇'), h('p', null, title), h('p', { className: 'gf-hint' }, detail))
       return h('section', { className: 'gf-settings', 'aria-label': '需求澄清', 'aria-busy': busy },
         h('style', null, styles),
@@ -196,7 +228,41 @@ window.__ModuleLoader__.load({
             h('span', null, label), Array.isArray(kind)
               ? h('select', { className: 'gf-input', value: config[key] ?? '', required: true, onChange: e => setConfig(v => ({ ...v, [key]: e.target.value })) }, kind.map(([value, title]) => h('option', { key: value, value }, title)))
               : h('input', { className: kind === 'boolean' ? 'gf-switch' : 'gf-input', role: kind === 'boolean' ? 'switch' : undefined, type: kind === 'boolean' ? 'checkbox' : 'number', ...(kind === 'boolean' ? { checked: Boolean(config[key]) } : { min: 1, max: kind, step: 1, required: true, value: config[key] ?? '' }), onChange: e => setConfig(v => ({ ...v, [key]: kind === 'boolean' ? e.target.checked : Number(e.target.value) })) })
-          )), h('label', { className: 'gf-stacked' }, '跳过词（每行一个）', h('textarea', { className: 'gf-input',
+          )),
+          h('div', { className: 'gf-field', style: { flexDirection: 'column', alignItems: 'stretch', gap: 10 } },
+            h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 20 } },
+              h('div', null,
+                h('label', { className: 'gf-field-title', htmlFor: 'gf-recommendation-mode' }, '开工决策'),
+                h('p', { className: 'gf-hint' }, recommendationHelpText)),
+              h('select', {
+                id: 'gf-recommendation-mode',
+                className: 'gf-input',
+                value: recommendationMode,
+                required: true,
+                onChange: e => setConfig(v => ({ ...v, recommendationMode: e.target.value })),
+              }, recommendationModes.map(([value, title]) => h('option', { key: value, value }, title)))),
+            h('p', { className: 'gf-hint' }, `当前生效类别：${effectiveCategoryText}`),
+            recommendationMode === 'custom' && h('div', { role: 'group', 'aria-label': '自定义自动推荐类别', style: { display: 'flex', flexWrap: 'wrap', gap: '10px 18px', paddingTop: 4 } },
+              recommendationCategoryDefs.map(([catId, catLabel]) => h('label', { key: catId, style: { display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' } },
+                h('input', {
+                  type: 'checkbox',
+                  value: catId,
+                  'data-category': catId,
+                  'aria-label': `开工决策类别：${catLabel}`,
+                  checked: recommendationCategories.includes(catId),
+                  onChange: e => {
+                    const checked = e.target.checked
+                    setConfig(v => {
+                      const current = Array.isArray(v.recommendationCategories) ? v.recommendationCategories : []
+                      const next = checked
+                        ? recommendationCategoryDefs.map(([id]) => id).filter(id => id === catId || current.includes(id))
+                        : current.filter(id => id !== catId)
+                      return { ...v, recommendationCategories: next }
+                    })
+                  },
+                }),
+                catLabel)))),
+          h('label', { className: 'gf-stacked' }, '跳过词（每行一个）', h('textarea', { className: 'gf-input',
             rows: 4, required: true, value: (config.bypassKeywords ?? []).join('\n'),
             onChange: e => setConfig(v => ({ ...v, bypassKeywords: e.target.value.split('\n') })),
           })), h('div', { className: 'gf-footer' }, h('button', { className: 'gf-button gf-primary', type: 'submit' }, '保存设置')))),

@@ -53,13 +53,13 @@ export const DIMENSION_HINTS: Record<keyof DimensionHit, string> = {
 
 /** 维度关键词：目标（有动作、有产出）。 */
 const GOAL_WORDS =
-  /(做|写|实现|搭建|开发|创建|新增|加个|修复|改|优化|重构|迁移|升级|翻译|整理|分析|生成|设计|部署|发布|测试|排查|调研|对比|总结|转换|导出|导入|接入|对接|编写|画|制作|搞|弄|\b(?:fix|add|implement|build|create|refactor|migrate|write|update|remove|delete|optimi[sz]e|translate|generate|analy[sz]e|design|deploy|publish|rewrite|upgrade|install|configure|support|enable|disable|clean|split|merge|rename)\b)/i
+  /(做|写|实现|搭建|开发|创建|新增|加个|修复|改|优化|重构|迁移|升级|翻译|整理|分析|生成|设计|部署|发布|测试|排查|调研|对比|总结|转换|导出|导入|接入|对接|编写|画|制作|搞|弄|\b(?:fix|add|implement|build|create|refactor|migrate|write|update|remove|delete|optimi[sz]e|translate|generate|analy[sz]e|design|deploy|publish|rewrite|upgrade|install|configure|support|enable|disable|clean|split|merge|rename|prepare|draft|compile|organi[sz]e|summari[sz]e)\b)/i
 /** 维度关键词：范围（边界、对象）。 */
 const SCOPE_WORDS =
   /(只|仅|只要|只需要|范围|限定|针对|面向|所有|全部|部分|哪些|哪个|模块|页面|文件|目录|接口|字段|表|库|版本|第一步|先做|不含|除外|\b(?:only|all|each|every|field|fields|page|pages|file|files|directory|module|api|endpoint|component|table|schema|version|repo|repository|branch|config|first)\b)/i
 /** 维度关键词：约束（技术栈、限制、风格）。忽略大小写，便于匹配 Python / UTF-8 这类写法。 */
 const CONSTRAINT_WORDS =
-  /(用|基于|必须|不能|不要|需要|依赖|兼容|保持|风格|注释|技术栈|框架|语言|不许|禁止|限制|预算|时间|截止|格式|规范|utf-?8|中文|英文|node|python|js|ts|react|vue|java|go|rust|\b(?:must|should|shall|need|needs|require|requires|required|use|using|based\s+on|compatible|compatibility|keep|preserve|avoid|without|existing)\b)/i
+  /(用|基于|必须|不能|不要|需要|依赖|兼容|保持|风格|注释|技术栈|框架|语言|不许|禁止|限制|预算|时间|截止|格式|规范|utf-?8|中文|英文|node|python|js|ts|react|vue|java|go|rust|\b(?:must|should|shall|need|needs|require|requires|required|use|using|based\s+on|compatible|compatibility|keep|preserve|avoid|without|existing|format|layout|style|markdown|chinese|english)\b)/i
 /** 维度关键词：验收标准。 */
 const ACCEPTANCE_WORDS =
   /(验收|标准|测试|通过|算完成|完成标准|结果|输出|期望|应该|返回|效果|达到|满足|可运行|跑通|全绿|正确|不报错|可用|验证|检查|示例|样例|截图|对比|\b(?:acceptance|criteria|test|tests|pass|passes|passing|expect|expected|output|verify|verified|green|works|working|screenshot|sample|example)\b)/i
@@ -89,6 +89,93 @@ const SPECIFIC_PATTERNS: readonly RegExp[] = [
 const TRANSFORM_PATTERN = /(把|将)[^，。；;]{1,60}(翻译|改|换|替换|转|转换|变|格式化成)(成|为)/
 /** 变更类语气词（drift-check 用）。 */
 const DRIFT_MARKERS = /(算了|改成|换成|不做了|不做了|换个|推倒重来|重新做|别做了|不搞了|改主意)/
+
+/** 外发/发送/发邮件/发通知信号。 */
+const SEND_SIGNAL =
+  /(?:(?:发送|(?<!研|开)发)[^\s，。；;,！？!?]{0,12}(?:报告|周报|月报|日报|总结|邮件|通知|消息)|邮件发送|外发|\bsend\s+(?:the\s+|this\s+|a\s+)?(?:[\w-]+\s+){0,3}(?:report|email|message|notification)\b|\bemail\s+(?:the\s+|this\s+)?(?:[\w-]+\s+){0,3}(?:report|summary|update)\b)/i
+/** 显式缺失收件人。 */
+const EXPLICIT_MISSING_RECIPIENT =
+  /(?:未指定收件人|没(?:有)?(?:说|给|写|指定)收件人|收件人(?:待定|未知|未定|不明|未填)|\bmissing\s+recipient\b|\bno\s+recipient\b|\brecipient\s+(?:tbd|unknown|missing|unspecified)\b)/i
+/** 邮箱地址或具体发送对象。 */
+const HAS_RECIPIENT = new RegExp(
+  [
+    '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+',
+    '(?:发给|发送给|寄给|抄送给?|转给|汇报给|通知给)\\s*(?!(?:谁|哪位|哪里|待定|未知|未定|未指定|无|空))[\\u4e00-\\u9fa5A-Za-z0-9_@#][^\\s，。；;,！？!?]*',
+    '(?:发送|(?<!研|开)发)[^\\s，。；;,！？!?]{0,12}(?:报告|周报|月报|日报|总结|邮件|通知|消息)给\\s*(?!(?:谁|哪位|哪里|待定|未知|未定|未指定|无|空))[\\u4e00-\\u9fa5A-Za-z0-9_@#][^\\s，。；;,！？!?]*',
+    '给\\s*(?!(?:谁|哪位|哪里|待定|未知|未定|未指定))[\\u4e00-\\u9fa5A-Za-z0-9_@#][^\\s，。；;,！？!?]{0,16}(?:发邮件|发送邮件|发报告|发送报告|发通知|发送通知)',
+    '收件人\\s*(?:[：:]|\\s)\\s*(?!(?:待定|未知|未定|未指定|无|空|谁|none|tbd|unknown))[^\\s，。；;,！？!?]+',
+    '(?<!发|发送)通知\\s*(?!(?:内容|文案|模板|消息|格式|标题|邮件|一下|一声|谁|哪位|待定|未知|未定|未指定))[\\u4e00-\\u9fa5A-Za-z0-9_@#]+',
+    '\\bto\\s+(?!(?:be|do|make|get|use|run|check|verify|test|confirm|ensure|fix|update|complete|finish|avoid|keep|see|show|review|pass|output|send|email|tbd|unknown|unspecified|none)\\b)[A-Za-z0-9_@][A-Za-z0-9_.@+-]*',
+  ].join('|'),
+  'i',
+)
+
+/** 发布/部署目标信号。 */
+const PUBLISH_OR_DEPLOY_SIGNAL = /(?:发布到|公开发布|对外发布|部署到|\bpublish\s+to\b|\bdeploy\s+to\b)/i
+/** 公开发布/对外发布信号（无明确渠道时属阻塞缺口）。 */
+const PUBLIC_PUBLISH_SIGNAL = /(?:公开发布|对外发布)/
+/** 显式缺失发布渠道或目标环境。 */
+const EXPLICIT_MISSING_PUBLISH_TARGET =
+  /(?:未指定(?:发布|部署|目标|渠道|环境)|没(?:有)?(?:指定|说|写)(?:发布|部署|目标|渠道|环境)|(?:发布|部署|目标)?(?:渠道|环境|平台)(?:待定|未知|未定)|(?:发布到|部署到)\s*(?:哪里|哪儿|哪|待定|未知|未定|$|[，。；;,！？!?])|\b(?:publish|deploy)\s+to\s*(?:where|tbd|unknown|unspecified|$|[,.;!?])|\b(?:target|environment|channel)\s+(?:tbd|unknown|missing|unspecified)\b|\bmissing\s+(?:target|environment|channel)\b)/i
+/** 常见发布平台/渠道/目标环境词。 */
+const PUBLISH_CHANNEL_WORDS =
+  /(?:github|gitlab|npm|pypi|docker(?:\s*hub)?|vercel|netlify|cloudflare|aws|gcp|azure|aliyun|阿里云|腾讯云|华为云|官网|博客|公众号|微信公众号|知乎|掘金|小红书|微博|推特|twitter|x\.com|youtube|bilibili|b站|飞书|钉钉|企业微信|slack|discord|telegram|app\s*store|google\s*play|生产环境|正式环境|预发环境|测试环境|线上|内网|外网|\bstaging\b|\bprod(?:uction)?\b|\bdev(?:elopment)?\b|\brelease\b|\bmarketplace\b|商店|论坛|社区|文档站|\bdocs\b|\bpages\b|https?:\/\/)/i
+
+/** 显式缺失目标文件/路径。 */
+const EXPLICIT_MISSING_FILE =
+  /(?:未指定目标文件|目标文件(?:待定|未知|未定)|没(?:有)?指定(?:目标)?文件|\bmissing\s+target\s+file\b|\bno\s+target\s+file\b)/i
+
+/** 多轮追问合并文本中，检查后续行是否已补齐前面显式标出的缺失事实。 */
+function resolvedInLaterLine(text: string, missingPattern: RegExp, isResolved: (line: string) => boolean): boolean {
+  const lines = text.split(/\r?\n/)
+  if (lines.length < 2) return false
+  let lastMissing = -1
+  let lastResolved = -1
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i]!
+    if (missingPattern.test(line)) lastMissing = i
+    if (isResolved(line) && !missingPattern.test(line)) lastResolved = i
+  }
+  return lastMissing >= 0 && lastResolved > lastMissing
+}
+
+/**
+ * 独立检测任务文本中缺失的关键阻塞事实（如外发缺收件人、发布/部署缺渠道环境、显式缺目标文件）。
+ * 只针对明显缺失且影响执行安全/正确性的关键事实，避免误伤普通开发任务。
+ */
+export function detectMissingCriticalFacts(text: string): string[] {
+  const flat = (text ?? '').trim()
+  if (flat === '') return []
+  const missing: string[] = []
+
+  if (SEND_SIGNAL.test(flat)) {
+    const explicitMissing =
+      EXPLICIT_MISSING_RECIPIENT.test(flat) &&
+      !resolvedInLaterLine(flat, EXPLICIT_MISSING_RECIPIENT, (line) => HAS_RECIPIENT.test(line))
+    if (explicitMissing || !HAS_RECIPIENT.test(flat)) {
+      missing.push('关键事实缺失：未指定收件人或发送对象，请先确认发给谁。')
+    }
+  }
+
+  if (PUBLISH_OR_DEPLOY_SIGNAL.test(flat)) {
+    const explicitMissing =
+      EXPLICIT_MISSING_PUBLISH_TARGET.test(flat) &&
+      !resolvedInLaterLine(flat, EXPLICIT_MISSING_PUBLISH_TARGET, (line) => PUBLISH_CHANNEL_WORDS.test(line))
+    const publicWithoutChannel = PUBLIC_PUBLISH_SIGNAL.test(flat) && !PUBLISH_CHANNEL_WORDS.test(flat)
+    if (explicitMissing || publicWithoutChannel) {
+      missing.push('关键事实缺失：未指定发布渠道或目标环境，请先确认发布到哪里。')
+    }
+  }
+
+  if (
+    EXPLICIT_MISSING_FILE.test(flat) &&
+    !resolvedInLaterLine(flat, EXPLICIT_MISSING_FILE, (line) => hasSpecifics(line))
+  ) {
+    missing.push('关键事实缺失：未指定目标文件或对象，请先明确操作目标。')
+  }
+
+  return missing
+}
 
 /** 统计文本命中的维度。 */
 export function detectDimensions(text: string): DimensionHit {
@@ -241,6 +328,17 @@ export function judgeTask(input: JudgeInput): JudgeResult {
   }
   if (isInquiry(text)) {
     return { verdict: 'clear', score: 90, focus_hints: [], dimensions, reason: 'inquiry' }
+  }
+
+  const missingFacts = detectMissingCriticalFacts(text)
+  if (missingFacts.length > 0) {
+    return {
+      verdict: 'needs-clarification',
+      score: Math.min(score, 50),
+      focus_hints: buildFocusHints(dimensions, missingFacts, text),
+      dimensions,
+      reason: 'missing-critical-facts',
+    }
   }
 
   if (input.mode === 'drift-check') {

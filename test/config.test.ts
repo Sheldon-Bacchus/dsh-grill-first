@@ -18,6 +18,8 @@ describe('normalizeConfig：8 个配置项', () => {
     expect(DEFAULT_CONFIG.bypassKeywords).toContain('直接做')
     expect(DEFAULT_CONFIG.memoryEnabled).toBe(true)
     expect(DEFAULT_CONFIG.memoryScope).toBe('project')
+    expect(DEFAULT_CONFIG.recommendationMode).toBe('manual')
+    expect(DEFAULT_CONFIG.recommendationCategories).toEqual([])
   })
 
   it('合法值原样保留', () => {
@@ -42,6 +44,8 @@ describe('normalizeConfig：8 个配置项', () => {
       memoryScope: 'global',
       researchMode: 'auto',
       researchDepth: 'quick',
+      recommendationMode: 'manual',
+      recommendationCategories: [],
     })
   })
 
@@ -84,8 +88,30 @@ describe('buildProtocolText：注入的系统提示段', () => {
     intensity: 'standard',
   })
 
-  it('不超过 600 字（R7 字数上限）', () => {
+  it('不超过协议字数上限（PROTOCOL_CHAR_LIMIT = 900）', () => {
+    expect(PROTOCOL_CHAR_LIMIT).toBe(900)
     expect(protocolLength(text)).toBeLessThanOrEqual(PROTOCOL_CHAR_LIMIT)
+  })
+
+  it('传入 50 条超长 bypassKeywords 时协议总长仍不超过 PROTOCOL_CHAR_LIMIT', () => {
+    const longKeywords = Array.from(
+      { length: 50 },
+      (_, idx) => `超长跳过关键词_${idx}_${'不要提问直接开始执行任务'.repeat(4)}`,
+    )
+    for (const recommendationMode of ['manual', 'standard'] as const) {
+      const built = buildProtocolText({
+        maxRounds: 10,
+        maxQuestionsPerRound: 5,
+        bypassKeywords: longKeywords,
+        intensity: 'grill',
+        researchMode: 'always',
+        recommendationMode,
+        recommendationCategories: ['presentation', 'draft_wording', 'draft_label'],
+      })
+      expect(protocolLength(built), recommendationMode).toBeLessThanOrEqual(PROTOCOL_CHAR_LIMIT)
+      expect(built).toContain('grill_start')
+      expect(built).toContain('grill_confirm')
+    }
   })
 
   it('包含六个关键动作', () => {
